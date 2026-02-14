@@ -45,14 +45,9 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.dropout = config.dropout
-        
-        # Causal mask to ensure attention is only applied to the left in the input sequence
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                1, 1, config.block_size, config.block_size
-            )
-        )
+        # Bias buffer not strictly needed for Flash Attention but kept for compatibility logic/custom masking if needed later? 
+        # Actually with Flash Attention is_causal=True we don't need the buffer masked_fill.
+        # Removing the buffer registration for bias as it is not used in scaled_dot_product_attention(is_causal=True).
     
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embedding dimensionality
@@ -63,12 +58,10 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         
-        # Causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float('-inf'))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_dropout(att)
-        y = att @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        # Flash Attention
+        # is_causal=True handles the masking ensuring we only attend to the past
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+        
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # Re-assemble all head outputs
         
         # Output projection
